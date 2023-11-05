@@ -5,8 +5,11 @@ import os
 import sys
 from dataclasses import asdict
 from pathlib import Path
+from typing import Literal
 
 from jinja2 import Template
+from web3.types import ABIFunction
+
 from pypechain.utilities.abi import (
     get_abi_items,
     get_param_name,
@@ -17,21 +20,19 @@ from pypechain.utilities.abi import (
 from pypechain.utilities.format import avoid_python_keywords, capitalize_first_letter_only
 from pypechain.utilities.templates import setup_templates
 from pypechain.utilities.types import solidity_to_python_type
-from web3.types import ABIFunction
 
+NUMBER_OF_ARGS = 2
 
 def main(abi_file_path: str, output_dir: str) -> None:
-    """Generates class files for a given abi.
+    """Generate class files for a given abi.
 
     Arguments
     ---------
     abi_file_path : str
         Path to the abi json file.
-
-    output_dr: str
+    output_dir: str
         Path to the directory to output the generated files.
     """
-
     # get names
     file_path = Path(abi_file_path)
     filename = file_path.name
@@ -50,6 +51,8 @@ def main(abi_file_path: str, output_dir: str) -> None:
     # Write the renders to a file
     types_output_file_path = Path(output_dir).joinpath(f"{contract_name}Types.py")
     contract_output_file_path = Path(output_dir).joinpath(f"{contract_name}Contract.py")
+    # Make folder if it doesn't exist
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
     with open(contract_output_file_path, "w", encoding="utf-8") as output_file:
         output_file.write(rendered_contract_code)
     with open(types_output_file_path, "w", encoding="utf-8") as output_file:
@@ -57,10 +60,12 @@ def main(abi_file_path: str, output_dir: str) -> None:
 
 
 def render_contract_file(contract_name: str, contract_template: Template, abi_file_path: Path) -> str:
-    """Returns a string of the contract file to be generated.
+    """Return a string of the contract file to be generated.
 
     Arguments
     ---------
+    contract_name : str
+        The name of the contract.
     contract_template : Template
         A jinja template containging types for all structs within an abi.
     abi_file_path : Path
@@ -71,7 +76,6 @@ def render_contract_file(contract_name: str, contract_template: Template, abi_fi
     str
         A serialized python file.
     """
-
     # TODO:  return types to function calls
     # Extract function names and their input parameters from the ABI
     abi_functions_and_events = get_abi_items(abi_file_path)
@@ -86,9 +90,9 @@ def render_contract_file(contract_name: str, contract_template: Template, abi_fi
                 # name is required in the typeguard.  Should be safe to default to empty string.
                 "name": name,
                 "capitalized_name": capitalize_first_letter_only(name),
-                "input_names_and_types": get_input_names_and_values(abi_function),
-                "input_names": get_input_names(abi_function),
-                "outputs": get_outputs(abi_function),
+                "input_names_and_types": get(abi_function, "inputs", include_types=True),
+                "input_names": get(abi_function, "inputs", include_types=False),
+                "outputs": get(abi_function, "outputs", include_types=True),
             }
             function_datas.append(function_data)
     # Render the template
@@ -96,10 +100,12 @@ def render_contract_file(contract_name: str, contract_template: Template, abi_fi
 
 
 def render_types_file(contract_name: str, types_template: Template, abi_file_path: Path) -> str:
-    """Returns a string of the types file to be generated.
+    """Return a string of the types file to be generated.
 
     Arguments
     ---------
+    contract_name : str
+        The name of the contract.
     types_template : Template
         A jinja template containging types for all structs within an abi.
     abi_file_path : Path
@@ -110,108 +116,47 @@ def render_types_file(contract_name: str, types_template: Template, abi_file_pat
     str
         A serialized python file.
     """
-
     abi = load_abi_from_file(abi_file_path)
-
     structs_by_name = get_structs_for_abi(abi)
     structs_list = list(structs_by_name.values())
     structs = [asdict(struct) for struct in structs_list]
     return types_template.render(contract_name=contract_name, structs=structs)
 
 
-def get_input_names_and_values(function: ABIFunction) -> list[str]:
-    """Returns function input name/type strings for jinja templating.
-
-    i.e. for the solidity function signature: function doThing(address who, uint256 amount, bool
-    flag, bytes extraData)
-
-    the following list would be returned: ['who: str', 'amount: int', 'flag: bool', 'extraData:
-    bytes']
+def get(
+    function: ABIFunction, param_type: Literal["inputs", "outputs"], include_types: bool = True
+) -> list[str] | dict[str, str]:
+    # TODO: recursively handle empty strings for evil nested tuples with no names.
+    """Return function inputs or outputs, optionally including types.
 
     Arguments
     ---------
     function : ABIFunction
-        A web3 dict of an ABI function description.
+        The function to parse.
+    param_type : str
+        Choice of "inputs" or "outputs"
+    include_types : bool
+        Whether to include the types of the parameters. Defaults to True.
 
-    Returns
-    -------
-    list[str]
-        A list of function names and corresponding python values, i.e. ['arg1: str', 'arg2: bool']
+    list[str] | dict[str, str]
+        The parsed parameters, in a list without types, or a dict with types.
     """
-
-    stringified_function_parameters: list[str] = []
-    for _input in function.get("inputs", []):
-        if name := get_param_name(_input):
-            python_type = solidity_to_python_type(_input.get("type", "unknown"))
-        else:
-            raise ValueError("Solidity function parameter name cannot be None")
-        stringified_function_parameters.append(f"{avoid_python_keywords(name)}: {python_type}")
-    return stringified_function_parameters
-
-
-def stringify_parameters(parameters) -> list[str]:
-    # TODO: handle empty strings.  Should replace them with 'arg1', 'arg2', and so one.
-    # TODO: recursively handle this too for evil nested tuples with no names.
-    """Stringifies parameters."""
-    stringified_function_parameters: list[str] = []
-    for _input in parameters:
-        if name := get_param_name(_input):
-            stringified_function_parameters.append(avoid_python_keywords(name))
-        else:
-            raise ValueError("input name cannot be None")
-    return stringified_function_parameters
-
-
-def get_input_names(function: ABIFunction) -> list[str]:
-    """Returns function input name/type strings for jinja templating.
-
-    i.e. for the solidity function signature:
-    function doThing(address who, uint256 amount, bool flag, bytes extraData)
-
-    the following list would be returned:
-    ['who', 'amount', 'flag', 'extraData']
-
-    Arguments
-    ---------
-    function : ABIFunction
-        A web3 dict of an ABI function description.
-
-    Returns
-    -------
-    list[str]
-        A list of function names i.e. ['arg1', 'arg2']
-
-    """
-    return stringify_parameters(function.get("inputs", []))
-
-
-def get_outputs(function: ABIFunction) -> list[str]:
-    """Returns function output name/type strings for jinja templating.
-
-    i.e. for the solidity function signature:
-    function doThing() returns (address who, uint256 amount, bool flag, bytes extraData)
-
-    the following list would be returned:
-    ['who', 'amount', 'flag', 'extraData']
-
-    Arguments
-    ---------
-    function : ABIFunction
-        A web3 dict of an ABI function description.
-
-    Returns
-    -------
-    list[str]
-        A list of function names i.e. [{name: 'arg1', type: 'int'}, { name: 'TransferInfo', components: [{
-            name: 'from', type: 'str'}, name: '
-        }]]
-    """
-    return stringify_parameters(function.get("outputs", []))
+    parameters = function.get(param_type, [])
+    params = {}
+    anon_count = 0
+    for param in parameters:
+        name = get_param_name(param)
+        if name is None or name == "":
+            name = f"{param_type[:-1]}{anon_count}"
+            param["name"] = name
+            anon_count += 1
+        params[avoid_python_keywords(name)] = solidity_to_python_type(param.get("type", "unknown"))
+    return [f"{k}: {v}" for k, v in params.items()] if include_types else list(params.keys())
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
-        print("Usage: python script_name.py <path_to_abi_file> <contract_address> <output_file>")
+    if len(sys.argv) != NUMBER_OF_ARGS:
+        print("Usage: python script_name.py <path_to_abi_file> <output_dir>")
     else:
         # TODO: add a bash script to make this easier, i.e. ./pypechain './abis', './build'
         # TODO: make this installable so that other packages can use the command line tool
